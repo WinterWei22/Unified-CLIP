@@ -1,0 +1,69 @@
+launcher_args: {experiment_name: clip_msg_unimol2,
+  script_name: "src/ms_pred/clip/clip_train_unimol.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [4,5,6,7]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 4, cpus-per-task: 7, job-name: clip_unimol, mem-per-cpu: 8G,
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  num-gpu: [4]
+
+  seed: [1]
+  num-workers: [8]
+  batch-size: [16]
+  max-epochs: [100]
+  precision: [bf16-mixed]
+
+  dataset-name: [msg]
+  split-name: [split_msg.tsv]
+
+  learning-rate: [0.0003]
+  lr-decay-rate: [0.825]
+  warm-up: [1000]
+  weight-decay: [1e-5]
+  patience: [20]
+
+  dropout: [0.1]
+  hidden-size: [512]
+
+  # UniMol2 molecular encoder
+  unimol-model-size: [84m]
+  frozen-unimol: [false]
+  # unfreeze-unimol-epoch: [3]
+
+  projection-dim: [512]
+
+  embed-adduct: [true]
+  embed-ce: [true]
+
+  # Spectrum encoder (DreaMS)
+  spec-ckpt: [/home/weiwentao/workspace/DreaMS/dreams/models/pretrained/ssl_model.ckpt]
+  dreams: [true]
+  # frozen-dreams: [true]
+  # frozen-epochs: [3]
+
+  # Loss config
+  # local-contra: [true]
+  # wo-global: [true]
+  # local-weight: [0.5]
+  # local-threshold: [0.5]
+
+  dataset-labels: [labels.tsv]
+
+  grad-accumulate: [1]
+  spec-sim-entropy: [true]
+  queue-size: [256]
+
+  # Precomputed UniMol2 features cache (run precompute_unimol_features.py first)
+  unimol-cache-dir: [data/spec_datasets/msg/unimol_features]
+
+iterative_args:
+  -  split-name: [split_msg.tsv]
+     save-dir: [split_msg_unimol_rnd1]
+     magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]

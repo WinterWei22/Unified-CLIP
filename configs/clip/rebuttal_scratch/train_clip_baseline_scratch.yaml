@@ -1,0 +1,70 @@
+launcher_args: {experiment_name: rebuttal_scratch/clip_baseline_scratch,
+  script_name: "src/ms_pred/clip/clip_train.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [2,3]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G,
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  num-gpu: [2]
+
+  seed: [42]
+  num-workers: [8]
+  batch-size: [256]
+  max-epochs: [100]
+
+  dataset-name: [msg]
+  split-name: [split_msg.tsv]
+
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.825]
+  warm-up: [1000]
+  weight-decay: [1e-5]
+  patience: [20]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  pool-op: [avg]
+  hidden-size: [512]
+
+  frag-set-layers: [3]
+  loss-fn: [cosine]
+
+  root-encode: [egt2d]
+  mabnet-layers: [4]
+  mabnet-heads: [16]
+  edge-update: [true]
+
+  projection-dim: [512]
+
+  binned-targs: [true]
+  embed-adduct: [true]
+  embed-ce: [true]
+  encode-forms: [true]
+
+  grad-accumulate: [1]
+  add-hs: [true]
+
+  # No local contrastive or fragment supervision (baseline)
+  # local-contra: [false]
+  # frag-supervised: [false]
+  # frags: [false]
+
+  dataset-labels: [labels.tsv]
+  spec-ckpt: [/home/weiwentao/workspace/DreaMS/dreams/models/pretrained/ssl_model.ckpt]
+  dreams: [true]
+  # From scratch: no freezing, no pretrained weights
+  frozen-dreams: [false]
+  no-pretrained-dreams: [true]
+
+iterative_args:
+  -  split-name: [split_msg.tsv]
+     save-dir: [split_msg_rnd1]
+     magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]

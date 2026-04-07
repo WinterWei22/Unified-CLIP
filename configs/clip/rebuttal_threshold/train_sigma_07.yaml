@@ -1,0 +1,114 @@
+iterative_args:
+- magma-dag-folder:
+  - /data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/
+  save-dir:
+  - sigma_07
+  split-name:
+  - split_msg.tsv
+launcher_args:
+  experiment_name: rebuttal_threshold
+  launch_method: local
+  script_name: src/ms_pred/clip/clip_train.py
+  slurm_script: launcher_scripts/generic_slurm.sh
+  visible_devices:
+  - 6
+universal_args:
+  _slurm_args:
+  - _num_gpu: 1
+    cpus-per-task: 7
+    job-name: forward_train
+    mem-per-cpu: 8G
+    nodelist: node[1236]
+    time: 1-18:00:00
+  add-hs:
+  - true
+  batch-size:
+  - 256
+  binned-targs:
+  - true
+  dataset-labels:
+  - labels.tsv
+  dataset-name:
+  - msg
+  debug:
+  - false
+  debug-overfit:
+  - false
+  dreams:
+  - true
+  dropout:
+  - 0.1
+  edge-update:
+  - true
+  embed-adduct:
+  - true
+  embed-ce:
+  - true
+  encode-forms:
+  - true
+  frag-path:
+  - /home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/frags_index_map_observed.hdf5
+  frag-set-layers:
+  - 3
+  frag-supervised:
+  - true
+  frag-supervised-weight:
+  - 0.5
+  frags:
+  - true
+  frozen-dreams:
+  - true
+  frozen-epochs:
+  - 3
+  gpu:
+  - true
+  grad-accumulate:
+  - 1
+  hidden-size:
+  - 512
+  learning-rate:
+  - 0.0003
+  local-contra:
+  - true
+  local-start-epochs:
+  - 10
+  local-threshold:
+  - 0.7
+  local-weight:
+  - 0.5
+  loss-fn:
+  - cosine
+  lr-decay-rate:
+  - 0.825
+  mabnet-heads:
+  - 16
+  mabnet-layers:
+  - 4
+  max-epochs:
+  - 100
+  mpnn-type:
+  - GGNN
+  num-gpu:
+  - 1
+  num-workers:
+  - 8
+  patience:
+  - 20
+  pe-embed-k:
+  - 0
+  pool-op:
+  - avg
+  projection-dim:
+  - 512
+  root-encode:
+  - egt2d
+  seed:
+  - 1
+  spec-ckpt:
+  - /home/weiwentao/workspace/DreaMS/dreams/models/pretrained/ssl_model.ckpt
+  split-name:
+  - split_msg.tsv
+  warm-up:
+  - 1000
+  weight-decay:
+  - 1.0e-05

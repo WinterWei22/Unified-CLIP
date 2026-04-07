@@ -1,0 +1,1285 @@
+import torch
+from torch.utils.data import Dataset
+
+import logging
+from pathlib import Path
+from typing import List
+import json
+import copy
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+import torch
+import dgl
+from torch.utils.data.dataset import Dataset
+import random
+
+import ms_pred.common as common
+import ms_pred.nn_utils as nn_utils
+import ms_pred.magma.fragmentation as fragmentation
+from torch.nn.utils.rnn import pad_sequence
+
+from ms_pred.mabnet.utils import dgl_to_pyg
+
+from rdkit import Chem
+from rdkit.Chem import Crippen
+from rdkit.Chem import AllChem
+from rdkit.DataStructs import FingerprintSimilarity
+import concurrent.futures
+from functools import partial
+from rdkit import DataStructs
+
+import h5py
+
+class TreeProcessor:
+    """TreeProcessor.
+
+    Hold key functionalities to read in a magma dag and proces it.
+
+    """
+
+    def __init__(
+        self,
+        pe_embed_k: int = 10,
+        root_encode: str = "gnn",
+        binned_targs: bool = False,
+        add_hs: bool = False,
+    ):
+        """ """
+        self.pe_embed_k = pe_embed_k
+        self.root_encode = root_encode
+        self.binned_targs = binned_targs
+        self.add_hs = add_hs
+        
+    def _convert_to_dgl(
+        self,
+        tree: dict,
+        include_targets: bool = True,
+        last_row=False,
+    ):
+        """_convert_to_dgl.
+
+        Args:
+            tree (dict): tree dictionary
+            include_targets (bool): Try to add inten targets for supervising
+                the inten model
+            last_row:
+        """
+        root_inchi = tree["root_inchi"]
+        engine = fragmentation.FragmentEngine(mol_str=root_inchi, mol_str_type="inchi")
+        # bottom_depth = engine.max_broken_bonds
+        bottom_depth = engine.max_tree_depth
+        if self.root_encode in ["gnn","mabnet", "visnet", "egt2d", "egt3d", "egt"]:
+            root_frag = engine.get_root_frag()
+            root_graph_dict = self.featurize_frag(
+                frag=root_frag,
+                engine=engine,
+            )
+            root_repr = root_graph_dict["graph"]
+        elif self.root_encode == "fp":
+            root_repr = common.get_morgan_fp_inchi(root_inchi)
+        else:
+            raise ValueError()
+
+        root_form = common.form_from_inchi(root_inchi)
+
+        # Need to include mass and inten targets here, maybe not necessary in
+        # all cases?
+        masses, inten_frag_ids, dgl_inputs, inten_targets, frag_targets, max_broken = (
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        forms = []
+        max_remove_hs, max_add_hs = [], []
+        for k, sub_frag in tree["frags"].items():
+            max_broken_num = sub_frag["max_broken"]
+            tree_depth = sub_frag["tree_depth"]
+
+            # Skip because we never fragment last row
+            if (not last_row) and (tree_depth == bottom_depth):
+                continue
+
+            binary_targs = sub_frag["atoms_pulled"]
+            frag = sub_frag["frag"]
+
+            # Get frag dict and target
+            frag_dict = self.featurize_frag(
+                frag,
+                engine,
+            )
+            forms.append(frag_dict["form"])
+            old_to_new = frag_dict["old_to_new"]
+            graph = frag_dict["graph"]
+            max_broken.append(max_broken_num)
+
+            max_remove_hs.append(sub_frag["max_remove_hs"])
+            max_add_hs.append(sub_frag["max_add_hs"])
+
+            if include_targets and not self.binned_targs:
+                inten_targs = sub_frag["intens"]
+                inten_targets.append(inten_targs)
+
+            inten_frag_ids.append(k)
+
+            # For gen model only!!·
+            targ_vec = np.zeros(graph.num_nodes())
+            for j in old_to_new[binary_targs]:
+                targ_vec[j] = 1
+
+            graph = frag_dict["graph"]
+
+            # Define targ vec
+            dgl_inputs.append(graph)
+            masses.append(sub_frag["base_mass"])
+            frag_targets.append(torch.from_numpy(targ_vec))
+
+        if include_targets and self.binned_targs:
+            inten_targets = np.array(tree["raw_spec"])
+
+        masses = engine.shift_bucket_masses[None, :] + np.array(masses)[:, None]
+        max_remove_hs = np.array(max_remove_hs)
+        max_add_hs = np.array(max_add_hs)
+        max_broken = np.array(max_broken)
+
+        # Feat each form
+        all_form_vecs = [common.formula_to_dense(i) for i in forms]
+        all_form_vecs = np.array(all_form_vecs)
+        root_form_vec = common.formula_to_dense(root_form)
+
+        out_dict = {
+            "root_repr": root_repr,
+            "dgl_frags": dgl_inputs,
+            "masses": masses,
+            "inten_targs": np.array(inten_targets) if include_targets else None,
+            "inten_frag_ids": inten_frag_ids,
+            "max_remove_hs": max_remove_hs,
+            "max_add_hs": max_add_hs,
+            "max_broken": max_broken,
+            "targs": frag_targets,
+            "form_vecs": all_form_vecs,
+            "root_form_vec": root_form_vec,
+        }
+        return out_dict
+    
+    def featurize_frag(
+        self,
+        frag: int,
+        engine: fragmentation.FragmentEngine,
+        add_random_walk: bool = False,
+    ) -> False:
+        """featurize_frag.
+
+        Prev.  dgl_from_frag
+
+        """
+
+        num_atoms = engine.natoms
+        atom_symbols = engine.atom_symbols
+        # Need to find all kept atoms and all kept bonds between
+        kept_atom_inds, kept_atom_symbols = engine.get_present_atoms(frag)
+        kept_bond_orders, kept_bonds = engine.get_present_edges(frag)
+
+        # H count
+        form = engine.formula_from_kept_inds(kept_atom_inds)    # counting each type of atoms
+
+        # Need to re index the targets to match the new graph size
+        num_kept = len(kept_atom_inds)
+        new_inds = np.arange(num_kept)
+        old_inds = kept_atom_inds
+
+        old_to_new = np.zeros(num_atoms, dtype=int)
+        old_to_new[old_inds] = new_inds
+
+        # Keep new_to_old for autoregressive predictions
+        new_to_old = np.zeros(num_kept, dtype=int)
+        new_to_old[new_inds] = old_inds
+
+        # Remap new bond inds
+        new_bond_inds = np.empty((0, 2), dtype=int)
+        if len(kept_bonds) > 0:
+            new_bond_inds = old_to_new[np.vstack(kept_bonds)]
+
+        if self.add_hs:
+            h_adds = np.array(engine.atom_hs)[kept_atom_inds]
+        else:
+            h_adds = None
+
+        # Make dgl graphs for new targets
+        graph = self.dgl_featurize(
+            np.array(atom_symbols)[kept_atom_inds],
+            h_adds=h_adds,
+            bond_inds=new_bond_inds,
+            bond_types=np.array(kept_bond_orders),
+        )
+
+        if add_random_walk:
+            self.add_pe_embed(graph)
+        return {
+            "graph": graph,
+            "new_to_old": new_to_old,
+            "old_to_new": old_to_new,
+            "form": form,
+        }
+
+    def _process_tree(
+        self,
+        tree: dict,
+        include_targets: bool = True,
+        last_row=False,
+        convert_to_dgl=True,
+    ):
+        """_process_tree.
+
+        Args:
+            tree (dict): tree dictionary
+            include_targets (bool): Try to add inten targets for supervising
+                the inten model
+            last_row:
+            pickle_input: If pickle_input, this
+        """
+        if convert_to_dgl:
+            out_dict = self._convert_to_dgl(tree, include_targets, last_row)
+        else:
+            out_dict = tree
+
+        dgl_inputs = out_dict["dgl_frags"]
+        root_repr = out_dict["root_repr"]
+
+        if self.pe_embed_k > 0:
+            for graph in dgl_inputs:
+                self.add_pe_embed(graph)
+
+            if isinstance(root_repr, dgl.DGLGraph):
+                self.add_pe_embed(root_repr)
+
+        if include_targets and self.binned_targs:
+            intens = out_dict["inten_targs"]
+            bin_posts = np.digitize(intens[:, 0], self.bins)
+            new_out = np.zeros_like(self.bins)
+            for bin_post, inten in zip(bin_posts, intens[:, 1]):
+                new_out[bin_post] = max(new_out[bin_post], inten)
+            inten_targets = new_out
+            out_dict["inten_targs"] = inten_targets
+        return out_dict
+
+    def add_pe_embed(self, graph):
+        pe_embeds = nn_utils.random_walk_pe(
+            graph, k=self.pe_embed_k, eweight_name="e_ind"
+        )
+        graph.ndata["h"] = torch.cat((graph.ndata["h"], pe_embeds), -1).float()
+        return graph
+    
+    def process_tree(self, tree, convert_to_dgl=True):
+        proc_out = self._process_tree(
+            tree, include_targets=False, last_row=True, convert_to_dgl=convert_to_dgl
+        )
+        keys = {
+            "root_repr",
+            "dgl_frags",
+            "max_remove_hs",
+            "max_add_hs",
+            "max_broken",
+            "form_vecs",
+            "root_form_vec",
+        }
+        dgl_tree = {i: proc_out[i] for i in keys}
+        return {"dgl_tree": dgl_tree, "tree": tree}
+
+    def process_mol(self, inchi: str):
+        engine = fragmentation.FragmentEngine(mol_str=inchi, mol_str_type="inchi")
+        if self.root_encode in ["gnn","mabnet", "visnet", "egt2d", "egt3d", "egt"]:
+            root_frag = engine.get_root_frag()
+            root_graph_dict = self.featurize_frag(
+                frag=root_frag,
+                engine=engine,
+            )
+            root_repr = root_graph_dict["graph"]
+            if self.pe_embed_k > 0:
+                self.add_pe_embed(root_repr)
+        elif self.root_encode == "fp":
+            root_repr = common.get_morgan_fp_inchi(inchi)
+        else:
+            raise ValueError()
+        return root_repr
+    
+    def dgl_featurize(
+        self,
+        atom_symbols: List[str],
+        h_adds: np.ndarray,
+        bond_inds: np.ndarray,
+        bond_types: np.ndarray,
+    ):
+        """dgl_featurize.
+
+        Args:
+            atom_symbols (List[str]): node_types
+            h_adds (np.ndarray): h_adds
+            bond_inds (np.ndarray): bond_inds
+            bond_types (np.ndarray)
+        """
+        node_types = [common.element_to_position[el] for el in atom_symbols]
+        node_types = np.vstack(node_types)
+        num_nodes = node_types.shape[0]
+
+        src, dest = bond_inds[:, 0], bond_inds[:, 1]
+        src_tens_, dest_tens_ = torch.from_numpy(src), torch.from_numpy(dest)
+        bond_types = torch.from_numpy(bond_types)
+        src_tens = torch.cat([src_tens_, dest_tens_])
+        dest_tens = torch.cat([dest_tens_, src_tens_])
+        bond_types = torch.cat([bond_types, bond_types])
+        bond_featurizer = torch.eye(fragmentation.MAX_BONDS)
+
+        bond_types_onehot = bond_featurizer[bond_types.long()]
+        node_data = torch.from_numpy(node_types)
+
+        # H data is defined, add that
+        if h_adds is None:
+            zero_vec = torch.zeros((node_data.shape[0], common.MAX_H))
+            node_data = torch.hstack([node_data, zero_vec])
+        else:
+            h_featurizer = torch.eye(common.MAX_H)
+            h_adds_vec = torch.from_numpy(h_adds)
+            node_data = torch.hstack([node_data, h_featurizer[h_adds_vec]])
+
+        g = dgl.graph(data=(src_tens, dest_tens), num_nodes=num_nodes)
+        g.ndata["h"] = node_data.float()
+        g.edata["e"] = bond_types_onehot.float()
+        g.edata["e_ind"] = bond_types.long()
+        return g
+
+    def get_node_feats(self):
+        return self.pe_embed_k + common.ELEMENT_DIM + common.MAX_H
+
+    def create_masked_graph_for_nodes(self, graph: dgl.DGLGraph, mask_ratio: float = 0.15):
+        """Create a masked graph for node (token) prediction."""
+        masked_graph = copy.deepcopy(graph)
+        num_nodes = masked_graph.num_nodes()
+        mask_indices = torch.randperm(num_nodes)[:int(num_nodes * mask_ratio)]
+        
+        # Original node features for labels (element one-hot part)
+        original_feats = masked_graph.ndata["h"][:, :common.ELEMENT_DIM]
+        node_labels = torch.argmax(original_feats, dim=-1)  # Assuming one-hot, get indices as labels
+        
+        # Mask: set to zero or a mask token (here, set element part to zero)
+        masked_graph.ndata["h"][mask_indices, :common.ELEMENT_DIM] = 0
+        
+        # Mask for loss computation
+        mask = torch.zeros(num_nodes, dtype=torch.bool)
+        mask[mask_indices] = True
+        
+        return masked_graph, node_labels, mask
+
+    def create_masked_graph_for_edges(self, graph: dgl.DGLGraph, mask_ratio: float = 0.15):
+        """Create a masked graph for edge prediction."""
+        masked_graph = copy.deepcopy(graph)
+        num_edges = masked_graph.num_edges()
+        if num_edges == 0:
+            return masked_graph, None, None, None, None
+        
+        mask_indices = torch.randperm(num_edges)[:int(num_edges * mask_ratio)]
+        
+        # Original edge indices for labels
+        original_edge_types = masked_graph.edata["e_ind"]
+        edge_labels = original_edge_types.clone()
+        
+        # Mask edges: remove masked edges from the graph
+        masked_graph = dgl.remove_edges(masked_graph, mask_indices)
+        
+        # For prediction, we might need to predict bond types for potential edges, but here simplify to predict types of masked edges
+        # Assuming we predict the bond type of the masked edges, and use the original src/dst
+        src, dst = graph.all_edges()
+        masked_src = src[mask_indices]
+        masked_dst = dst[mask_indices]
+        masked_edge_labels = edge_labels[mask_indices]
+        
+        return masked_graph, masked_edge_labels, mask_indices, masked_src, masked_dst
+
+class MolDataset(Dataset):
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tree_processor: TreeProcessor,
+        **kwargs,
+    ):
+        self.df = df
+        self.tree_processor = tree_processor
+        self.valid_indices = []
+
+        # Pre-filter valid entries to determine dataset length
+        for idx in tqdm(range(len(self.df)), desc="Filtering valid molecules"):
+            row = self.df.iloc[idx]
+            smiles = row["smiles"]
+            try:
+                # mol = Chem.MolFromSmiles(smiles)
+                # if mol is None:
+                #     continue
+                # Just check if InChI can be generated; no heavy processing here
+                # Chem.MolToInchi(mol)
+                self.valid_indices.append(idx)
+            except Exception:
+                continue
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def __getitem__(self, idx):
+        actual_idx = self.valid_indices[idx]
+        row = self.df.iloc[actual_idx]
+        smiles = row["smiles"]
+        name = row.get("name", smiles)
+
+        try:
+            # Parse SMILES
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                raise ValueError(f"Invalid SMILES: {smiles}")
+
+            # Convert to InChI
+            inchi = Chem.MolToInchi(mol)
+
+            # Generate molecular graph
+            root_repr = self.tree_processor.process_mol(inchi)
+            if not isinstance(root_repr, dgl.DGLGraph):
+                raise ValueError(f"Non-graph representation for {name}")
+
+            return {
+                "name": name,
+                "root_repr": root_repr,
+            }
+
+        except Exception as e:
+            # Log the error and skip by returning None
+            logging.warning(f"Error processing {name} at index {actual_idx}: {e}")
+            return None
+
+    def get_node_feats(self) -> int:
+        """get_node_feats."""
+        return self.tree_processor.get_node_feats()
+    
+    @classmethod
+    def get_collate_fn(cls):
+        return MolDataset.collate_fn
+
+    @staticmethod
+    def collate_fn(
+        input_list,
+    ):
+        # Filter out None (skipped) items
+        input_list = [j for j in input_list if j is not None]
+        
+        # If all items are skipped, raise an error or handle appropriately
+        if not input_list:
+            raise ValueError("All items in the batch are invalid and were skipped.")
+
+        names = [j["name"] for j in input_list]
+        root_reprs = [j["root_repr"] for j in input_list]
+        
+        if len(root_reprs) > 0:
+            if isinstance(root_reprs[0], dgl.DGLGraph):
+                batched_reprs = dgl.batch(root_reprs)
+                # batched_reprs = dgl_to_pyg(batched_reprs)
+            else:
+                batched_reprs = torch.FloatTensor(np.stack(root_reprs))
+        else:
+            batched_reprs = None
+        
+        
+        output = {
+            "names": names,
+            "root_reprs": dgl_to_pyg(batched_reprs),
+        }
+        return output
+
+class CLIPDataset(Dataset):
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tree_processor: TreeProcessor,
+        magma_map: dict,
+        max_spec_len: int = 64,
+        decoys: bool = False,
+        decoys_num: int = 5,
+        decoys_df: pd.DataFrame = None,
+        easy_decoys_ratio: float = 0.0,
+        frags: bool = False,
+        augment: bool = False,
+        mz_shift_aug_max: float = 50.0,
+        mz_shift_aug_p: float = 0.3,
+        emb_ce: bool = False,
+        frag_supervised: bool = False,
+        frags_path: str = None,
+        frag_noise_ratio: float = 0.0,
+        **kwargs,
+    ):
+        self.df = df
+        self.tree_processor = tree_processor
+        self.magma_map = magma_map
+        self.max_spec_len = max_spec_len
+        self.decoys = decoys
+        self.decoys_num = decoys_num
+        self.decoys_df = decoys_df
+        self.frags = frags
+        
+        self.augment = augment
+        self.mz_shift_aug_p = mz_shift_aug_p
+        self.mz_shift_aug_max = mz_shift_aug_max
+        
+        self.frag_supervised = frag_supervised
+        self.frag_noise_ratio = frag_noise_ratio
+
+        self.emb_ce = emb_ce
+        # self.valid_indices = []
+
+        # for idx in tqdm(range(len(self.df)), desc="Filtering valid molecules"):
+        #     row = self.df.iloc[idx]
+        #     smiles = row["smiles"]
+        #     try:
+        #         # mol = Chem.MolFromSmiles(smiles)
+        #         # if mol is None:
+        #         #     continue
+        #         # Just check if InChI can be generated; no heavy processing here
+        #         # Chem.MolToInchi(mol)
+        #         self.valid_indices.append(idx)
+        #     except Exception:
+        #         continue
+        self.spec_names = self.df["spec"].values
+        self.name_to_dict = self.df.set_index("spec").to_dict(orient="index")
+        for i in self.name_to_dict:
+            self.name_to_dict[i]["magma_file"] = self.magma_map[i]
+            
+        self.name_to_adduct = dict(self.df[["spec", "ionization"]].values)
+        self.name_to_adducts = {
+            i: common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names   # (name, adduct_type)
+        }
+        
+        if self.emb_ce:
+            self.name_to_ce = dict(self.df[["spec", "collision_energies"]].values)
+
+        # Prepare decoys grouping if decoys mode is enabled
+        self.spec_to_decoys = {}
+        if self.decoys and self.decoys_df is not None:
+            for k, g in self.decoys_df.groupby("spec"):
+                self.spec_to_decoys[k] = g
+        
+        self.easy_decoys_ratio = easy_decoys_ratio
+        if self.decoys:
+            self.easy_df = self.decoys_df[self.decoys_df["similarity"] > 0.05]
+            
+        if self.frag_supervised:
+            self.frag_data = None
+            self.frags_path = frags_path
+                
+        
+    def read_tree(self, x):
+        filename = self.name_to_dict[x]["magma_file"]
+        with open(filename, "r") as f:
+            tree = json.load(f)
+        return tree
+    
+    def recursively_load_dict(self, h5_obj):
+        """
+        递归地将 HDF5 Group/Dataset 还原为 Python 字典。
+        """
+        # 1. 如果是 Group (对应字典)，递归处理子项
+        if isinstance(h5_obj, h5py.Group):
+            return {key: self.recursively_load_dict(val) for key, val in h5_obj.items()}
+        
+        # 2. 如果是 Dataset (对应数据)，提取值
+        elif isinstance(h5_obj, h5py.Dataset):
+            value = h5_obj[()]
+            
+            # 处理标量字符串 (bytes -> str)
+            if isinstance(value, bytes):
+                return value.decode('utf-8')
+                
+            # 处理字符串数组 (numpy bytes array -> numpy str array)
+            if isinstance(value, np.ndarray) and value.dtype.kind == 'S':
+                return value.astype('U') # 转为 Unicode
+                
+            # 处理之前存入的 "None" 字符串
+            if isinstance(value, str) and value == "None":
+                return None
+                
+            return value
+        
+    def convert_to_padded_array(self, data_dict):
+        """
+        将单个 spec 的碎片字典转换为 padding 后的 numpy 数组
+        """
+        # 提取所有碎片的原子列表
+        # data_dict 结构: {'HASH': {'atoms': [1, 2...], ...}, ...}
+        frag_atom_lists = [v['atoms'] for v in data_dict.values()]
+        
+        num_frags = len(frag_atom_lists)
+        if num_frags == 0:
+            return np.empty((0, 0), dtype=np.int32)
+
+        # 计算最大原子数
+        max_atoms = max(len(atoms) for atoms in frag_atom_lists)
+        
+        # 初始化填充为 -1 的矩阵
+        padded_array = np.full((num_frags, max_atoms), -1, dtype=np.int32)
+        
+        # 填充数据
+        for i, atoms in enumerate(frag_atom_lists):
+            length = len(atoms)
+            if length > 0:
+                padded_array[i, :length] = atoms
+                
+        return padded_array
+
+    
+    def __len__(self):
+        return len(self.df)
+        # return len(self.valid_indices)
+    
+    def read_hdf5(self, path):
+        frags_data = h5py.File(path, 'r')
+        return frags_data
+
+    def __getitem__(self, idx):
+        # actual_idx = self.valid_indices[idx]
+        if self.frag_supervised:
+            if self.frag_data is None:
+                self.frag_data = h5py.File(self.frags_path, 'r')
+        actual_idx = idx
+        row = self.df.iloc[actual_idx]
+        smiles = row["smiles"]
+        name = row["spec"]
+        tree = self.read_tree(name)
+        spec = tree["raw_spec"]
+        prec_mz = tree['prec_mz']
+        inchikey = row['inchikey']
+        adduct = self.name_to_adducts[name]
+        spec_scaled = [[sublist[0], sublist[1] * 100] for sublist in spec]
+        
+        spec.insert(0, [prec_mz,1.1])
+        
+        spec_scaled.insert(0, [prec_mz,1.1])
+        
+        if self.augment and self.mz_shift_aug_p > 0:
+            if random.random() < self.mz_shift_aug_p:
+                shift = (random.random() - 0.5) * 2 * self.mz_shift_aug_max   # [-max, +max]
+                for peak in spec:
+                    peak[0] += shift
+        ce = 0.0
+        if self.emb_ce:
+            ce = self.name_to_ce.get(name, float('nan'))
+        
+        item = {
+            "name": name,
+            "spec": spec,
+            "prec_mz": prec_mz,
+            "spec_scaled": spec_scaled,
+            "max_spec_len": self.max_spec_len,
+            "adduct": adduct,
+            "inchikey": inchikey,
+            "ce": ce,
+        }
+        # try:
+            # Parse SMILES
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid SMILES: {smiles}")
+
+        # Convert to InChI
+        inchi = Chem.MolToInchi(mol)
+        if self.frags:
+            # Generate molecular graph
+            all_entry = self.tree_processor.process_tree(self.read_tree(name))["dgl_tree"]
+            item.update(all_entry)
+        else:
+            root_repr = self.tree_processor.process_mol(inchi)
+            item.update({"root_repr": root_repr})
+        
+            if not isinstance(root_repr, dgl.DGLGraph):
+                raise ValueError(f"Non-graph representation for {name}")
+            
+        frag_label = None
+        if self.frag_supervised:
+            if f'{name}' in self.frag_data:
+                frag_label = self.frag_data[name][()]
+            # frag_label = self.recursively_load_dict(self.frag_data[name])
+                # frag_label = self.convert_to_padded_array(frag_label)
+            else:
+                frag_label = np.full((2, mol.GetNumAtoms()), -1)    # padding for mol with no frags 
+                
+            # Noise injection for rebuttal experiment: flip 0↔1 with frag_noise_ratio probability
+            # Only applied when frag_noise_ratio > 0 (training only, val dataset has 0.0)
+            if self.frag_noise_ratio > 0.0 and frag_label is not None:
+                valid_mask = (frag_label != -1)  # only flip valid (non-padding) elements
+                flip_mask = np.random.random(frag_label.shape) < self.frag_noise_ratio
+                flip_mask = flip_mask & valid_mask
+                frag_label = frag_label.copy()
+                frag_label[flip_mask] = 1 - frag_label[flip_mask]
+
+            item["frag_label"] = frag_label
+
+        if self.decoys:
+            decoys_group = self.spec_to_decoys.get(name, pd.DataFrame())
+            num_available = len(decoys_group)
+            decoy_reprs = []
+            decoy_adducts = []
+            decoy_sims = []
+            if num_available > 0:
+                if "similarity" in decoys_group.columns:
+                    decoys_group = decoys_group.sort_values("similarity", ascending=False)
+                
+                hard_num = int(self.decoys_num * (1 - self.easy_decoys_ratio))
+                easy_num = self.decoys_num - hard_num
+
+                # 优化：动态采样hard decoys，使用相似度作为概率权重（softmax），偏向高sim
+                if len(decoys_group) >= hard_num:
+                    sim_probs = torch.softmax(torch.tensor(decoys_group["similarity"].values[:hard_num]), dim=0)  # 取top 2x，采样以增加多样性
+                    selected_indices = torch.multinomial(sim_probs, hard_num, replacement=False)
+                    selected_hard = decoys_group.iloc[selected_indices]
+                else:
+                    selected_hard = decoys_group.sample(hard_num, replace=True)
+
+                # Easy decoys: 从整个decoys_df随机，但过滤低sim (<0.1) 以避免太易负样本
+                easy_df = self.easy_df.sample(easy_num, replace=True) if easy_num > 0 else pd.DataFrame()
+
+                selected_decoys = pd.concat([selected_hard, easy_df])
+
+                # Process selected decoys (不变，但收集decoy_sims作为list)
+                successful_reprs = []
+                successful_adducts = []
+                successful_sims = []
+                for _, decoy_row in selected_decoys.iterrows():
+                    try:
+                        decoy_smiles = decoy_row["smiles"]
+                        decoy_mol = Chem.MolFromSmiles(decoy_smiles)
+                        if decoy_mol is None:
+                            raise ValueError(f"Invalid SMILES for decoy: {decoy_smiles}")
+                        decoy_inchi = Chem.MolToInchi(decoy_mol)
+                        decoy_root_repr = self.tree_processor.process_mol(decoy_inchi)
+                        if not isinstance(decoy_root_repr, dgl.DGLGraph):
+                            raise ValueError(f"Non-graph representation for decoy")
+                        decoy_ionization = decoy_row["ionization"]
+                        decoy_adduct = common.ion2onehot_pos[decoy_ionization]
+                        successful_reprs.append(decoy_root_repr)
+                        successful_adducts.append(decoy_adduct)
+                        successful_sims.append(decoy_row.get("similarity", 0.0))
+                    except Exception as e:
+                        logging.warning(f"Error processing decoy for {name}: {e}")
+                        continue
+                
+                decoy_reprs = successful_reprs
+                decoy_adducts = successful_adducts
+                decoy_sims = successful_sims
+
+            item["decoy_reprs"] = decoy_reprs
+            item["decoy_adducts"] = decoy_adducts
+            item["decoy_sims"] = decoy_sims
+
+        return item
+
+        # except Exception as e:
+        #     # Log the error and skip by returning None
+        #     logging.warning(f"Error processing {name} at index {actual_idx}: {e}")
+        #     return None
+
+    def get_node_feats(self) -> int:
+        """get_node_feats."""
+        return self.tree_processor.get_node_feats()
+    
+    @classmethod
+    def get_collate_fn(cls):
+        return CLIPDataset.collate_fn
+
+    @staticmethod
+    def compute_batch_similarity(specs_list, bin_width=0.1):
+        """
+        基于 Binning 的余弦相似度计算。
+        Args:
+            specs_list: List[List[List[float]]], 形状为 [batch_size, n_peaks, 2] (mz, intensity)
+            bin_width: Bin 的宽度 (Da), 默认 0.1 Da
+        Returns:
+            torch.Tensor: (batch_size, batch_size) 的相似度矩阵
+        """
+        if not specs_list:
+            return torch.empty(0, 0)
+
+        # 1. 确定 Bin 的范围 (Max m/z)
+        # 展平所有 peaks 找到最大 m/z
+        max_mz = 0.0
+        for spec in specs_list:
+            if not spec: continue
+            # spec is list of [mz, int], use generator for speed
+            m_mz = max(p[0] for p in spec) if len(spec) > 0 else 0
+            if m_mz > max_mz: max_mz = m_mz
+            
+        if max_mz == 0:
+            bs = len(specs_list)
+            return torch.eye(bs) # 全零或单位阵
+
+        # 维度: (Batch_Size, Num_Bins)
+        # 假设 max_mz=2000, bin=0.1 => 20000 维，计算量很小
+        n_bins = int(np.ceil(max_mz / bin_width)) + 1
+        batch_size = len(specs_list)
+        
+        # 使用 float32 节省内存
+        bin_matrix = np.zeros((batch_size, n_bins), dtype=np.float32)
+
+        # 2. 填充矩阵 (Binning)
+        for i, spec in enumerate(specs_list):
+            if not spec: continue
+            # 转为 numpy 处理更快
+            spec_arr = np.array(spec, dtype=np.float32) 
+            mzs = spec_arr[:, 0]
+            ints = spec_arr[:, 1]
+
+            # 计算 bin 索引
+            bin_indices = np.floor(mzs / bin_width).astype(int)
+            bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+            # 累加强度 (处理同一个 bin 落入多个 peak 的情况)
+            # 这是一个非常快的操作
+            np.add.at(bin_matrix[i], bin_indices, ints)
+
+        # 3. 计算 Cosine Similarity
+        # L2 归一化: v / ||v||
+        norms = np.linalg.norm(bin_matrix, axis=1, keepdims=True)
+        # 避免除以 0
+        norms[norms < 1e-8] = 1.0 
+        normalized_matrix = bin_matrix / norms
+
+        # 矩阵乘法计算相似度: Sim = A @ A.T
+        sim_matrix = np.dot(normalized_matrix, normalized_matrix.T)
+
+        return torch.from_numpy(sim_matrix)
+
+    @staticmethod
+    def collate_fn(
+        input_list,
+    ):
+        # Filter out None (skipped) items
+        input_list = [j for j in input_list if j is not None]
+        
+        # If all items are skipped, raise an error or handle appropriately
+        if not input_list:
+            raise ValueError("All items in the batch are invalid and were skipped.")
+
+        names = [j["name"] for j in input_list]
+        root_reprs = [j["root_repr"] for j in input_list]
+        specs = [j['spec'] for j in input_list]
+        prec_mzs = [j['prec_mz'] for j in input_list]
+        ces = [j['ce'] for j in input_list]
+        ces = torch.FloatTensor(ces)
+        specs_scaled = [j['spec_scaled'] for j in input_list]
+        max_spec_len = input_list[0]['max_spec_len']
+        adducts = [j["adduct"] for j in input_list]
+        adducts = torch.FloatTensor(adducts)
+        inchikeys = [j["inchikey"] for j in input_list]
+        
+        batch_size = len(input_list)
+        same_molecule_mask = torch.zeros(batch_size, batch_size, dtype=torch.bool)
+
+        if batch_size > 1:
+            inchikey_list = [j["inchikey"] for j in input_list]
+            for i in range(batch_size):
+                for j in range(batch_size):
+                    if inchikey_list[i] == inchikey_list[j]:
+                        same_molecule_mask[i, j] = True
+        
+        spec_sim_matrix = CLIPDataset.compute_batch_similarity(specs_scaled, bin_width=0.1)
+        
+        frag_graphs = None
+        root_inds = None
+        if input_list[0].get("dgl_frags", None) is not None:
+            frag_graphs = [j["dgl_frags"] for j in input_list]
+            frag_graphs_e = [j for i in frag_graphs for j in i]
+            num_frags = torch.LongTensor([len(i) for i in frag_graphs])
+            # frag_atoms = torch.LongTensor([i.num_nodes() for i in frag_graphs_e])
+            frag_batch = dgl.batch(frag_graphs_e)
+            root_inds = torch.arange(len(frag_graphs)).repeat_interleave(num_frags)
+
+        frag_labels = None
+        frags_masks = None
+        if input_list[0].get("frag_label", None) is not None:
+            frag_labels = [j["frag_label"] for j in input_list]
+            frag_labels, frags_masks = pad_2d_batch_with_mask(frag_labels)
+        # print(f'frags shape: {frag_labels.shape}')
+        
+        # batched_reprs = _collate_root_poses(input_list)
+        if len(root_reprs) > 0:
+            if isinstance(root_reprs[0], dgl.DGLGraph):
+                batched_reprs = dgl.batch(root_reprs)
+                # batched_reprs = dgl_to_pyg(batched_reprs)
+            else:
+                batched_reprs = torch.FloatTensor(np.stack(root_reprs))
+        else:
+            batched_reprs = None
+        
+        batched_specs, _ = pad_tuples_to_tensor(specs, max_len=max_spec_len)
+        batched_specs_scaled, specs_mask  = pad_tuples_to_tensor(specs_scaled, max_len=max_spec_len)
+        
+        decoys_reprs_list = []
+        decoys_adducts_list = []
+        decoys_batch = []
+        all_decoy_sims = []  # list of lists -> flatten to tensor later
+        for batch_idx, item in enumerate(input_list):
+            d_reprs = item.get("decoy_reprs", [])
+            d_adducts = item.get("decoy_adducts", [])
+            d_sims = item.get("decoy_sims", [])
+            decoys_reprs_list.extend(d_reprs)
+            decoys_adducts_list.extend(d_adducts)
+            decoys_batch.extend([batch_idx] * len(d_reprs))
+            all_decoy_sims.extend(d_sims)  # extend floats
+        
+        if len(decoys_reprs_list) > 0:
+            if isinstance(decoys_reprs_list[0], dgl.DGLGraph):
+                batched_decoys_reprs = dgl.batch(decoys_reprs_list)
+            else:
+                batched_decoys_reprs = torch.FloatTensor(np.stack(decoys_reprs_list))
+            batched_decoys_adducts = torch.FloatTensor(decoys_adducts_list)
+            decoys_batch_tensor = torch.LongTensor(decoys_batch)
+            all_decoy_sims = []
+            for item in input_list:
+                all_decoy_sims.extend(item.get("decoy_sims", []))
+        else:
+            batched_decoys_reprs = None
+            batched_decoys_adducts = None
+            decoys_batch_tensor = None
+            all_decoy_sims = None
+        
+        output = {
+            "names": names, 
+            "inchikeys": inchikeys,
+            "same_molecule_mask": same_molecule_mask,
+            "decoys_reprs": dgl_to_pyg(batched_decoys_reprs) if batched_decoys_reprs is not None else None,
+            "decoys_adducts": batched_decoys_adducts,
+            "decoys_batch": decoys_batch_tensor,
+            "decoy_sims": all_decoy_sims if all_decoy_sims else None,
+            "root_reprs": dgl_to_pyg(batched_reprs) if batched_reprs is not None else None,
+            "specs": batched_specs,
+            "specs_scaled": batched_specs_scaled,
+            "specs_mask": specs_mask,
+            "adducts": adducts,
+            "decoy_sims": torch.tensor(all_decoy_sims).to(torch.float32) if all_decoy_sims else None,
+            "frag_graphs": dgl_to_pyg(frag_batch) if frag_graphs is not None else None,
+            "inds": root_inds,
+            "ces": ces,
+            "frag_labels": frag_labels,
+            "frag_masks": frags_masks,
+            "spec_sim_matrix": spec_sim_matrix,
+        }
+        return output
+
+class CLIP_SmiDataset(Dataset):
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tree_processor: TreeProcessor,
+        magma_map=dict,
+        emb_ce=False,
+        max_spec_len=64,
+        **kwargs,
+    ):
+        self.df = df
+        self.tree_processor = tree_processor
+        self.spec_names = self.df["spec"].values
+        
+        self.name_to_adduct = dict(self.df[["spec", "ionization"]].values)  
+        self.name_to_adducts = {
+            i: common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names   # (name, adduct_type)
+        }
+        
+        self.emb_ce = emb_ce
+        if self.emb_ce:
+            self.name_to_ce = dict(self.df[["spec", "collision_energies"]].values)
+        
+        self.magma_map = magma_map
+        unique_keys = set(self.df['spec'].values.tolist())
+        self.name_to_dict = {unique_key: {} for unique_key in unique_keys}
+        for i in self.name_to_dict:
+            self.name_to_dict[i]["magma_file"] = self.magma_map[i]
+        self.max_spec_len = max_spec_len
+    def __len__(self):
+        return len(self.df)
+        return len(self.valid_indices)
+
+    def read_tree(self, x):
+        filename = self.name_to_dict[x]["magma_file"]
+        with open(filename, "r") as f:
+            tree = json.load(f)
+        return tree
+    def __getitem__(self, idx):
+        # actual_idx = self.valid_indices[idx]
+        actual_idx = idx
+        row = self.df.iloc[actual_idx]
+        smiles = row["smiles"]
+        name = row["spec"]
+        tree = self.read_tree(name)
+        spec = tree["raw_spec"]
+        prec_mz = tree['prec_mz']
+        spec.insert(0, [prec_mz,1.1])
+        
+        try:
+            flag = row['label']
+        except:
+            flag = None
+
+        adduct = self.name_to_adducts[name]
+
+        try:
+            # Parse SMILES
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                raise ValueError(f"Invalid SMILES: {smiles}")
+
+            inchi = Chem.MolToInchi(mol)
+            if mol is None:
+                raise ValueError(f"Invalid SMILES: {smiles}")
+            root_repr = self.tree_processor.process_mol(inchi)
+            if not isinstance(root_repr, dgl.DGLGraph):
+                raise ValueError(f"Non-graph representation for {name}")
+            ce = 0.0
+            if self.emb_ce:
+                ce = self.name_to_ce.get(name, float('nan'))
+
+            return {
+                "name": name,
+                "flag": flag,
+                "root_repr": root_repr,
+                "adduct": adduct,
+                "ce": ce,
+                "spec": spec,
+                "max_spec_len": self.max_spec_len,
+                "smiles": smiles
+            }
+
+        except Exception as e:
+            # Log the error and skip by returning None
+            logging.warning(f"Error processing {name} at index {actual_idx}: {e}")
+            return None
+        
+    def filter_invalid(self):
+        valid_indices = []
+        for idx in tqdm(range(len(self.df)), desc="Filtering valid molecules"):
+            row = self.df.iloc[idx]
+            smiles = row["smiles"]
+            name = row["spec"]
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is None:
+                    raise ValueError(f"Invalid SMILES: {smiles}")
+
+                inchi = Chem.MolToInchi(mol)
+                root_repr = self.tree_processor.process_mol(inchi)
+                if not isinstance(root_repr, dgl.DGLGraph):
+                    raise ValueError(f"Non-graph representation for {name}")
+                valid_indices.append(idx)
+            except Exception:
+                continue
+        self.valid_indices = valid_indices
+        
+        return self.df.iloc[valid_indices]
+            
+
+    def get_node_feats(self) -> int:
+        """get_node_feats."""
+        return self.tree_processor.get_node_feats()
+    
+    @classmethod
+    def get_collate_fn(cls):
+        return CLIP_SmiDataset.collate_fn
+
+    @staticmethod
+    def collate_fn(
+        input_list,
+    ):
+        # Filter out None (skipped) items
+        input_list = [j for j in input_list if j is not None]
+        
+        # If all items are skipped, raise an error or handle appropriately
+        if not input_list:
+            raise ValueError("All items in the batch are invalid and were skipped.")
+
+        names = [j["name"] for j in input_list]
+        smiless = [j["smiles"] for j in input_list]
+        flags = [j["flag"] for j in input_list]
+        root_reprs = [j["root_repr"] for j in input_list]
+        specs = [j['spec'] for j in input_list]
+        max_spec_len = input_list[0]['max_spec_len']
+        batched_specs, specs_mask = pad_tuples_to_tensor(specs, max_len=max_spec_len)
+        
+        if len(root_reprs) > 0:
+            if isinstance(root_reprs[0], dgl.DGLGraph):
+                batched_reprs = dgl.batch(root_reprs)
+                # batched_reprs = dgl_to_pyg(batched_reprs)
+            else:
+                batched_reprs = torch.FloatTensor(np.stack(root_reprs))
+        else:
+            batched_reprs = None
+            
+        adducts = [j["adduct"] for j in input_list]
+        adducts = torch.FloatTensor(adducts)
+        ces = [j['ce'] for j in input_list]
+        ces = torch.FloatTensor(ces)
+        
+        output = {
+            "names": names,
+            "flags": flags,
+            "root_reprs": dgl_to_pyg(batched_reprs),
+            "adducts": adducts,
+            "ces": ces,
+            "specs": batched_specs,
+            "specs_mask": specs_mask,
+            "smiless": smiless,
+        }
+        return output
+
+
+def _unroll_pad(input_list, key):
+    if input_list[0][key] is not None:
+        out = [torch.FloatTensor(i[key]) for i in input_list]
+        out_padded = torch.nn.utils.rnn.pad_sequence(out, batch_first=True)
+        return out_padded
+    return None
+
+def _stack_tensors(tensor_list, max_nodes=None):
+    num = len(tensor_list)
+    nodes_list = [t.shape[0] for t in tensor_list]
+    num_nodes = max(nodes_list) if max_nodes is None else max_nodes
+
+    result = torch.zeros((num, num_nodes, 3), dtype=tensor_list[0].dtype)
+
+    for i, tensor in enumerate(tensor_list):
+        nodes = tensor.shape[0]
+        result[i, :nodes, :] = tensor
+    
+    return result
+
+def pad_tuples_to_tensor(data, max_len=128, dtype=torch.float32, device=None):
+    """
+    data: List[List[Tuple[Number, Number]]], length n
+    max_len: target length (default 128)
+    dtype: output tensor dtype
+    device: output tensor device (optional)
+
+    Returns: a tensor of shape (n, max_len, 2) and a mask tensor of shape (n, max_len)
+    """
+    n = len(data)
+    if n == 0:
+        out = torch.zeros((0, max_len, 2), dtype=dtype, device=device)
+        mask = torch.zeros((0, max_len), dtype=dtype, device=device)
+        return out, mask
+
+    tensors = []
+    lengths = []
+    for i, pairs in enumerate(data):
+        length = min(len(pairs), max_len)
+        lengths.append(length)
+        if length == 0:
+            tensors.append(torch.empty((0, 2), dtype=dtype, device=device))
+            continue
+        # Convert to tensor and truncate
+        t = torch.tensor(pairs[:length], dtype=dtype, device=device)
+        if t.ndim != 2 or t.shape[1] != 2:
+            raise ValueError(f"Sample {i} is not composed of 2-tuples, got shape {t.shape}")
+        tensors.append(t)
+
+    # Pad the tensors to the max length in the batch
+    padded = pad_sequence(tensors, batch_first=True, padding_value=0)
+
+    # If the max length in batch is less than max_len, pad further
+    current_max = padded.shape[1]
+    if current_max < max_len:
+        pad_amount = max_len - current_max
+        padded = torch.nn.functional.pad(padded, (0, 0, 0, pad_amount), value=0)
+
+    # Create mask of shape (n, max_len) with 1.0 for data, 0.0 for padding
+    positions = torch.arange(max_len, device=device).unsqueeze(0).expand(n, max_len)  # (n, max_len)
+    lengths_tensor = torch.tensor(lengths, device=device).unsqueeze(1)  # (n, 1)
+    mask = (positions < lengths_tensor).to(dtype)  # (n, max_len), float
+
+    return padded, mask
+
+# def pad_tuples_to_tensor(data, max_len=128, dtype=torch.float32, device=None):
+#     """
+#     data: List[List[Tuple[Number, Number]]], length n
+#     max_len: target length (default 128)
+#     dtype: output tensor dtype
+#     device: output tensor device (optional)
+
+#     Returns: a tensor of shape (n, max_len, 2)
+#     """
+#     n = len(data)
+#     out = torch.zeros((n, max_len, 2), dtype=dtype, device=device)
+
+#     for i, pairs in enumerate(data):
+#         # Normalize each element to a 2D list/tensor
+#         # Truncate or pad
+#         length = min(len(pairs), max_len)
+#         if length > 0:
+#             # Copy the first `length` pairs
+#             # Convert to a tensor of shape (length, 2)
+#             t = torch.tensor(pairs[:length], dtype=dtype, device=device)
+#             if t.ndim != 2 or t.shape[1] != 2:
+#                 raise ValueError(f"Sample {i} is not composed of 2-tuples, got shape {t.shape}")
+#             out[i, :length, :] = t
+
+#     return out
+
+
+def pad_2d_batch_with_mask(data_list, padding_value=-1):
+    bs = len(data_list)
+    max_frags = max(item.shape[0] for item in data_list)
+    max_atoms = max(item.shape[1] for item in data_list)
+
+    dtype = torch.from_numpy(data_list[0]).dtype
+    
+    padded_batch = torch.full((bs, max_frags, max_atoms), padding_value, dtype=dtype)
+    
+    mask = torch.zeros((bs, max_frags, max_atoms), dtype=torch.bool)
+    
+    for i, arr in enumerate(data_list):
+        f, a = arr.shape
+        padded_batch[i, :f, :a] = torch.from_numpy(arr)
+        mask[i, :f, :a] = True
+        
+    return padded_batch, mask
+
+def _collate_root(input_list):
+    root_reprs = [j["root_repr"] for j in input_list]
+    if isinstance(root_reprs[0], dgl.DGLGraph):
+        batched_reprs = dgl.batch(root_reprs)
+    elif isinstance(root_reprs[0], np.ndarray):
+        batched_reprs = torch.FloatTensor(np.vstack(root_reprs)).float()
+    else:
+        raise NotImplementedError()
+    return batched_reprs
+
+def _collate_root_poses(input_list):
+    # root_reprs = [j["root_repr"] for j in input_list]
+    # if isinstance(root_reprs[0], dgl.DGLGraph):
+    #     batched_reprs = dgl.batch(root_reprs)
+    # elif isinstance(root_reprs[0], np.ndarray):
+    #     batched_reprs = torch.FloatTensor(np.vstack(root_reprs)).float()
+    # else:
+    #     raise NotImplementedError()
+    # return batched_reprs
+
+    root_reprs = [j["root_repr"] for j in input_list]
+    if hasattr(root_reprs[0], 'graph_data'):
+        poses = [j['root_repr'].graph_data['pos'] for j in input_list]
+        # poses_paded = _stack_tensors(poses)
+        poses_cat = torch.cat(poses, dim=0)
+    if isinstance(root_reprs[0], dgl.DGLGraph):
+        batched_reprs = dgl.batch(root_reprs)
+    elif isinstance(root_reprs[0], np.ndarray):
+        batched_reprs = torch.FloatTensor(np.vstack(root_reprs)).float()
+    else:
+        raise NotImplementedError()
+    batched_reprs.graph_data = {'pos': poses_cat}
+    return batched_reprs

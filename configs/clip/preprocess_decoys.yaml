@@ -1,0 +1,78 @@
+launcher_args: {experiment_name: clip_decoys_preprocess,
+  script_name: "src/ms_pred/clip/clip_train.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  num-gpu: [1]
+
+  seed: [1]
+  num-workers: [64]
+  batch-size: [4]
+  max-epochs: [200]
+
+  dataset-name: [msg]
+  split-name: [split_msg.tsv]
+  
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.825]
+  warm-up: [1000]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]  # 0
+  pool-op: [avg]
+  hidden-size: [512] #128
+  weight-decay: [1e-7]
+
+  frag-set-layers: [3] #[1]
+  loss-fn: [cosine]
+
+  root-encode: [egt2d]
+  mabnet-layers: [16]
+  mabnet-heads: [4]
+  edge-update: [true]
+
+  projection-dim: [512]
+  
+  inject-early: [false]
+  binned-targs: [true] 
+  embed-adduct: [true]
+  encode-forms: [true]
+
+  grad-accumulate: [1]
+  add-hs: [true]
+
+  # temperature: [0.07]
+  # local-contra: [true]
+  decoys: [true]
+  decoys-num: [10]
+  preprocess-decoys: [true]
+
+  dataset-labels: [labels_confs.pkl]
+  # mol-ckpt: [/home/weiwentao/workspace/ms-pred/results/egt_pretrain/2025_11_05-1005_156439_deb438f98d0ce45df4721b5ee162fffa/version_0/best.ckpt]
+  spec-ckpt: [/home/weiwentao/workspace/DreaMS/dreams/models/pretrained/ssl_model.ckpt]
+
+iterative_args:
+  -  split-name: [split_msg.tsv]
+     save-dir: [split_msg_rnd1]
+     seed: [1]
+     magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_100_inten/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd2/preds_train_100_inten/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd3/preds_train_100_inten/]

@@ -1,0 +1,1 @@
+python launcher_scripts/run_from_config.py configs/clip/train_spectraverse.yaml

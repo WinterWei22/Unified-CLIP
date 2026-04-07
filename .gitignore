@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# Pretrained weights (download separately)
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+Uni-Mol/unimol_tools/unimol_tools/weights/
+
+# Data
+data/
+results/
+results_generation/
+*.pkl
+*.h5
+*.hdf5
+*.npz
+*.npy
+
+# Logs & outputs
+logs/
+lightning_logs/
+wandb/
+*.log
+nohup.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Env
+.env

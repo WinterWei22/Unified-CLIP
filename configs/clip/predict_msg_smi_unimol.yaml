@@ -1,0 +1,32 @@
+launcher_args: {experiment_name: predict_msg_unimol,
+  script_name: "src/ms_pred/clip/clip_predict_smi_unimol.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [0,1,2,3]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 4, job-name: predict_unimol, mem-per-cpu: 8G,
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+
+  gpu: [true]
+  num-gpu: [4]
+
+  num-workers: [8]
+  batch-size: [80]
+
+  dataset-name: [msg]
+  split-name: [split_msg.tsv]
+  subset-datasets: [test_only]
+
+  dataset-labels: [cands_df_test_mass_256_new_filtered_filteredagain.tsv]
+  checkpoint-pth: [/home/weiwentao/workspace/ms-pred/results_generation/clip_msg_unimol2/split_msg_unimol_rnd1/version_51/best-epoch=18-val_loss=1.0534.ckpt]
+
+  save-dir: [/home/weiwentao/workspace/ms-pred/results_generation/clip_msg_unimol2/split_msg_unimol_rnd1/version_51/]
+  binned-out: [true]
+
+  unimol-cache-dir: [data/spec_datasets/msg/retrieval/unimol_features]
+
+iterative_args:
+  -  split-name: [split_msg.tsv]
+     magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]

@@ -1,0 +1,76 @@
+launcher_args: {experiment_name: rebuttal_noise_ft,
+  script_name: "src/ms_pred/clip/clip_train.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [2]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G,
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  num-gpu: [1]
+
+  seed: [1]
+  num-workers: [8]
+  batch-size: [64]
+  max-epochs: [30]
+
+  dataset-name: [msg]
+  split-name: [split_msg.tsv]
+
+  learning-rate: [0.00005]
+  lr-decay-rate: [0.9]
+  warm-up: [500]
+  weight-decay: [1e-5]
+  patience: [10]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  pool-op: [avg]
+  hidden-size: [512]
+
+  frag-set-layers: [3]
+  loss-fn: [cosine]
+
+  root-encode: [egt2d]
+  mabnet-layers: [4]
+  mabnet-heads: [16]
+  edge-update: [true]
+
+  projection-dim: [512]
+
+  binned-targs: [true]
+  embed-adduct: [true]
+  embed-ce: [true]
+  encode-forms: [true]
+
+  grad-accumulate: [4]
+  add-hs: [true]
+
+  local-contra: [true]
+  local-weight: [0.5]
+  local-threshold: [0.5]
+  frag-supervised: [true]
+  frag-path: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/frags_index_map_observed.hdf5]
+  frag-supervised-weight: [0.5]
+  local-start-epochs: [0]
+  frags: [true]
+
+  dataset-labels: [labels.tsv]
+  spec-ckpt: [/home/weiwentao/workspace/DreaMS/dreams/models/pretrained/ssl_model.ckpt]
+  dreams: [true]
+  frozen-dreams: [true]
+  frozen-epochs: [0]
+
+  frag-noise-ratio: [0.5]
+  clip-ckpt: [/home/weiwentao/workspace/ms-pred/results/clip_msg_local/split_msg_rnd1/version_16/best.ckpt]
+
+iterative_args:
+  -  split-name: [split_msg.tsv]
+     save-dir: [/home/weiwentao/workspace/ms-pred/results/rebuttal_noise_ft/noise_0.5]
+     magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]

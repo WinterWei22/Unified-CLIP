@@ -1,0 +1,74 @@
+launcher_args: {experiment_name: clip_canopus_finetune,
+  script_name: "src/ms_pred/mabnet/train_inten_pyg.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [6,7]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  num-gpu: [2]
+
+  seed: [1]
+  num-workers: [16]
+  batch-size: [8]
+  max-epochs: [200]
+
+  dataset-name: [canopus_train_public]
+  split-name: [split_1.tsv]
+
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.9]  # 0.825
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [14]  # 0
+  pool-op: [avg]
+  hidden-size: [512] #128
+  weight-decay: [1e-7]
+  set-layers: [0]
+  frag-set-layers: [3] #[1]
+  loss-fn: [cosine]
+
+  root-encode: [egt2d]  # egt2d, egt3d
+  mabnet-layers: [4]
+  mabnet-heads: [16]
+  edge-update: [true]
+
+  frag-layers: [8]
+  frag-heads: [8]
+
+  inject-early: [false]
+  binned-targs: [true] 
+  embed-adduct: [true]
+  encode-forms: [true]
+
+  grad-accumulate: [1]
+  add-hs: [true]
+
+  dataset-labels: [labels_confs.pkl]
+  # encoder-ckpt: [/home/weiwentao/workspace/ms-pred/results/egt_pretrain/2025_08_22-1743_231522_561f4581f1413619be1abf3dc8cc43db/version_0/best.ckpt]
+  # clip-ckpt: [/home/weiwentao/workspace/ms-pred/results/clip_train_canopus/split_1_rnd1/version_3/best.ckpt]
+  clip-ckpt: [/home/weiwentao/workspace/ms-pred/results/clip_train_canopus_local/split_1_rnd1/version_7/best.ckpt]
+  cross-attention-mode: [true]
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     seed: [1]
+     magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd1/preds_train_100_inten/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd2/preds_train_100_inten/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd3/preds_train_100_inten/]

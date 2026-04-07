@@ -1,0 +1,46 @@
+launcher_args: {experiment_name: predict_msg,
+  script_name: "src/ms_pred/clip/clip_predict_smi.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [5]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 4, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+
+  gpu: [true]
+
+  num-workers: [16]
+  batch-size: [64]
+
+  dataset-name: [msg]
+  split-name: [split_msg.tsv]
+  subset-datasets: [test_only]
+
+  # dataset-labels: [cands_df_test_formula_256_new_filtered_filteredagain.tsv]
+  # dataset-labels: [cands_df_test_formula_256_merged.tsv]
+  # dataset-labels: [cands_df_test_formula_256_no_stereo_clean_tauts_new.tsv]
+  # dataset-labels: [cands_df_test_formula_256_new_filtered_filteredagain_small.tsv]
+  dataset-labels: [cands_df_test_mass_256_new_filtered_filteredagain.tsv]
+  # dataset-labels: [cands_df_test_formula_256_no_stereo_clean_tauts.tsv]
+  # dataset-labels: [cands_df_test_formula_256_no_stereo_clean_tauts_filtered.tsv]
+  checkpoint: [/home/weiwentao/workspace/ms-pred/results/clip_msg_just_local/split_msg_rnd1/version_1/best.ckpt] # version_6/2.2287
+
+  save-dir: [/home/weiwentao/workspace/ms-pred/results/clip_msg_just_local/split_msg_rnd1/version_1/]
+  binned-out: [true]
+
+iterative_args:
+  -  split-name: [split_msg.tsv]
+    #  save-dir: [split_msg_rnd1]
+     magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd2/preds_train_100_inten/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd3/preds_train_100_inten/]

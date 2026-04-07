@@ -1,0 +1,112 @@
+launcher_args: {experiment_name: clip_spectraverse,
+  script_name: "src/ms_pred/clip/clip_train.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [5]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  num-gpu: [1]
+
+  seed: [42]
+  num-workers: [8]
+  batch-size: [256]
+  max-epochs: [100]
+
+  dataset-name: [spectraverse]
+  split-name: [split_msg.tsv]
+  # random-split: [true]
+  # train-val: [true]
+  
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.825]
+  warm-up: [1000]
+  weight-decay: [1e-5]
+  patience: [20]
+
+  dropout: [0.1]  # 0.1
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]  # 14
+  pool-op: [avg]
+  hidden-size: [512] # 512
+
+  frag-set-layers: [3] #[1]
+  loss-fn: [cosine]
+
+  root-encode: [egt2d]
+  mabnet-layers: [4]  # 12
+  mabnet-heads: [16]
+  edge-update: [true]
+
+  projection-dim: [512] # 512
+  
+  # inject-early: [true]
+  binned-targs: [true] 
+  embed-adduct: [true]
+  embed-ce: [true]
+  encode-forms: [true]
+
+  grad-accumulate: [1]
+  add-hs: [true]
+  spec-sim-entropy: [true]
+
+  # temperature: [0.07]
+  # local-contra: [true]
+  # local-weight: [0.5]
+  # local-threshold: [0.3]
+  # frag-supervised: [true]
+  # frag-path: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/frags_index_map_observed.hdf5]
+  # frag-supervised-weight: [0.5]
+  # local-start-epochs: [10]
+  # frags: [true]
+
+  # decoys: [true]
+  # decoys-num: [32]
+  # decoys-path: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/decoys/decoys_from_test/decoys_512_sim_32.tsv]
+  # decoys-path: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/decoys/decoys_with_similarity_split_msg_filtered_valid.tsv]
+  # decoys-path: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/decoys/decoys_by_mass_processed_with_similarity_split_msg.tsv]
+  # easy-decoys-ratio: [0.0]
+
+
+  dataset-labels: [labels_filtered.tsv]
+  # dataset-labels: [labels_confs.pkl]
+  # mol-ckpt: [/home/weiwentao/workspace/ms-pred/results/egt_pretrain/2025_11_28-1346_633730_15b732eb417b9e101b8f0ab9fb0ebc93/version_0/best.ckpt]
+  spec-ckpt: [/home/weiwentao/workspace/DreaMS/dreams/models/pretrained/ssl_model.ckpt]
+  dreams: [true]
+  frozen-dreams: [true]
+  frozen-epochs: [3]
+
+  # augment: [true]
+  # mz-shift-aug-p: [0.3]
+  # mz-shift-aug-max: [50]
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd42]
+     seed: [42]
+    #  magma-dag-folder: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/magma_outputs/small/magma_outputs/tree_with_spec/] # MassSpecGymID0000195
+     magma-dag-folder: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/spectraverse/spectraverse_json/]
+
+  # -  split-name: [split_msg.tsv]
+  #    save-dir: [split_msg_rnd1]
+  #    seed: [42]
+  #    frozen-epochs: [10]
+  #    learning-rate: [0.00005]
+  #   #  lr-decay-rate: [0.900]
+  #   #  magma-dag-folder: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/magma_outputs/small/magma_outputs/tree_with_spec/] # MassSpecGymID0000195
+  #    magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]
+
+
+  # -  split-name: [split_msg.tsv]
+  #    save-dir: [split_msg_rnd1]
+  #    seed: [1]
+  #    frozen-epochs: [10]
+  #   #  lr-decay-rate: [0.900]
+  #   #  magma-dag-folder: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/msg/magma_outputs/small/magma_outputs/tree_with_spec/] # MassSpecGymID0000195
+  #    magma-dag-folder: [/data/weiwentao/ms-pred/results/dag_msg_train/split_msg_rnd1/preds_train_20_inten_corrected/]

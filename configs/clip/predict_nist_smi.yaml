@@ -1,0 +1,42 @@
+launcher_args: {experiment_name: predict_nist20,
+  script_name: "src/ms_pred/clip/clip_predict_smi.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [3]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 4, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+
+  gpu: [true]
+
+  num-workers: [16]
+  batch-size: [32]
+
+  dataset-name: [nist20]
+  split-name: [scaffold_1.tsv]
+  subset-datasets: [test_only]
+
+
+  dataset-labels: [cands_df_scaffold_1_50.tsv]
+
+  checkpoint: [/home/weiwentao/workspace/ms-pred/results/clip_nist_local/split_scaffold/version_1/best.ckpt]
+
+  save-dir: [/home/weiwentao/workspace/ms-pred/results/clip_nist_local/split_scaffold/version_1/]
+  binned-out: [true]
+
+iterative_args:
+  -  split-name: [scaffold_1.tsv]
+    #  save-dir: [split_msg_rnd1]
+     magma-dag-folder: [/home/weiwentao/workspace/ms-pred/data/spec_datasets/nist20/nist_json/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd2/preds_train_100_inten/]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+  #    magma-dag-folder: [results/dag_canopus_train_public/split_1_rnd3/preds_train_100_inten/]

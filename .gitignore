@@ -13,7 +13,9 @@ build/
 *.ckpt
 *.bin
 *.safetensors
-Uni-Mol/unimol_tools/unimol_tools/weights/
+# Keep weights Python code but ignore actual weight files
+Uni-Mol/unimol_tools/unimol_tools/weights/modelzoo/
+!Uni-Mol/unimol_tools/unimol_tools/weights/*.py
 
 # Data
 data/

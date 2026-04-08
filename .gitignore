@@ -17,8 +17,8 @@ build/
 Uni-Mol/unimol_tools/unimol_tools/weights/modelzoo/
 !Uni-Mol/unimol_tools/unimol_tools/weights/*.py
 
-# Data
-data/
+# Data (only top-level data directory)
+/data/
 results/
 results_generation/
 *.pkl

@@ -16,7 +16,7 @@ from rdkit.Chem import AllChem
 
 import sys
 # Add Uni-Mol/unimol_tools to path (relative to repo root)
-_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 sys.path.insert(0, os.path.join(_repo_root, 'Uni-Mol', 'unimol_tools'))
 
 from unimol_tools.models.unimolv2 import UniMolV2Model

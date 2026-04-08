@@ -306,7 +306,7 @@ def train_model():
     tb_path = tb_logger.log_dir
     os.makedirs(os.path.dirname(tb_path), exist_ok=True)
     # Save a snapshot of source code and configs alongside the checkpoint
-    _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
+    _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
     _src_dir = os.path.join(_project_root, 'src', 'ms_pred')
     _cfg_dir = os.path.join(_project_root, 'configs', 'clip')
     if os.path.isdir(_src_dir):
